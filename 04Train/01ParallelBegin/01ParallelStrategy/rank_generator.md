@@ -10,7 +10,10 @@ Intra Node 指将通信更多放在机内，对带宽要求比较高；Inter Nod
 
 #### rank generator
 分为两个类型，稠密部分（tp-cp-dp-pp），MoE 部分（tp-ep-dp-pp）也叫做（etp-ep-edp-pp）与 world_size 的关系为：
-$$world\_size = tp * cp * dp * pp = etp * ep * edp * pp$$
+
+$$ world\_size = tp\_count \times dp\_count $$
+
+$$\text{world\_size} = tp \times cp \times dp \times pp = etp \times ep \times edp \times pp$$
 
 若为**稠密模型**，将选用前者建立通信域；若为 **MoE 模型**，可在 ATTN 部分选用前者建立通信域，在 MLP 部分选用后者。这意味着，原本需要 CP8 x EP8 = 64卡，在这种设计下针对 MoE 模型仅需要8卡，这种设计也叫 **MoE Folding Parallel**. 因此将会引出两种 Rank Generator —— decoder_rank_generator, expert_decoder_rank_generator.
 
@@ -25,12 +28,12 @@ $$world\_size = tp * cp * dp * pp = etp * ep * edp * pp$$
 
 先看 TP4-PP2-DP2 求 DP 域，原始 `order(tp-cp-ep-dp-pp)` 确定通信域中的 ranks，没有 cp 域与 ep 域，直接跳过即可
 1. 求什么域 mask 什么域，剩余通信域（tp-pp）求 dp_group_index 形式化一下就是：
-$$dp\_group\_index = tp\_rank + pp\_rank * tp\_size\ \ (1)$$
+$\text{dp\_group\_index} = \text{tp\_rank} + \text{pp\_rank} \times \text{tp\_size}$
 
-2. 计算出通信域中存在多少 `group` 后确定全局 rank 中哪些 rank 分别属于哪个 group_index（以 range 形式遍历），形式化一下：
-$$global\_rank = tp\_rank  + dp\_rank * tp\_size + pp\_rank * tp\_size * dp\_size\ \ (2)$$
+2. 计算出通信域中存在多少 group 后确定全局 rank 中哪些 rank 分别属于哪个 group_index（以 range 形式遍历），形式化一下：
+$$\text{global\_rank} = \text{tp\_rank} + \text{dp\_rank} \times \text{tp\_size} + \text{pp\_rank} \times \text{tp\_size} \times \text{dp\_size} \quad (2)$$
 
-$$dp\_group[dp\_group\_index] = tp\_rank + range(0, dp\_size) * tp\_size + pp\_rank * tp\_size * dp\_size\ \ (3)$$
+$$\text{dp\_group[dp\_group\_index]} = \text{tp\_rank} + range(0, \text{dp\_size}) \times \text{tp\_size} + \text{pp\_rank} \times \text{tp\_size} \times \text{dp\_size} \quad (3)$$
 
 可以观察到式(1)是将式(2)中要求的**域 mask（对应 rank 置为0，对应 size 置为1）** 而导出的，而式(3)又是由式(1)与式(2)推导出来的。
 
@@ -125,12 +128,12 @@ pp_group[7] = 3 + 1 * 4 + range(0, 2) * 4 * 2 ==> [7, 15] # dp1 遍历完 tp0, t
 ETP1-PP2-EP4-EDP2 求 EP 域，依旧遵从原始 `order(tp-cp-ep-dp-pp)` 来开始计算：
 
 1. 求什么域 mask 什么域，剩余通信域（etp-edp-pp）求 ep_group_index 形式化一下就是：
-$$ep\_group\_index = etp\_rank + edp\_rank * etp\_size + pp\_rank * etp\_size * edp\_size\ \ (1)$$
+$$\text{ep\_group\_index} = \text{etp\_rank} + \text{edp\_rank} \times \text{etp\_size} + \text{pp\_rank} \times \text{etp\_size} \times \text{edp\_size} \quad (1)$$
 
-2. 计算出通信域中存在多少 `group` 后确定全局 rank 中哪些 rank 分别属于哪个 group_index（以 range 形式遍历），形式化一下：
-$$global\_rank = etp\_rank  + ep\_rank * etp\_size + edp\_rank * etp\_size * edp\_size + pp\_rank * etp\_size * ep\_size * edp\_size\ \ (2)$$
+2. 计算出通信域中存在多少 group 后确定全局 rank 中哪些 rank 分别属于哪个 group_index（以 range 形式遍历），形式化一下：
+$$\text{global\_rank} = \text{etp\_rank} + \text{ep\_rank} \times \text{etp\_size} + \text{edp\_rank} \times \text{etp\_size} \times \text{edp\_size} + \text{pp\_rank} \times \text{etp\_size} \times \text{ep\_size} \times \text{edp\_size} \quad (2)$$
 
-$$ep\_group[ep\_group\_index] = etp\_rank + range(0, ep\_size) * etp\_size + edp\_rank * etp\_size * edp\_size + pp\_rank * etp\_size * ep\_size * edp\_size\ \ (3)$$
+$$\text{ep\_group[ep\_group\_index]} = \text{etp\_rank} + range(0, \text{ep\_size}) \times \text{etp\_size} + \text{edp\_rank} \times \text{etp\_size} \times \text{ep\_size} + \text{pp\_rank} \times \text{etp\_size} \times \text{ep\_size} \times \text{edp\_size} \quad (3)$$
 
 依据上述并行策略的具体推导例子：
 ```python
@@ -217,15 +220,12 @@ pp_group[7] = 0 + 3 * 1 + 1 * 1 * 4 + range(0, 2) * 1 * 4 * 2 ==> [7, 15] # edp1
 """
 ```
 
-手工做完了所有的推导，可以返回去看看 ranks 划分图，相信会有更多的理解。在掌握了原理后就不用手工推导了，可以直接使用 [rank_generator.py](./rank_generator.py) 进行自动化划分。
-```shell
-python rank_generator.py --world-size 16 --tp 4 --pp 2
-python rank_generator.py --world_size 16 --tp 4 --pp 2 --etp 1 --ep 4
-```
+手工做完了所有的推导，可以返回去看看 ranks 划分图，相信会有更多的理解。在掌握了原理后就不用手工推导了，可以直接使用 [rank_generator](./rank_generator_notebook.ipynb) 进行自动化划分。
+
 本质就是上文手工推导时候用到的大量的 **mask**、**prefix profuct** 两个概念，这一切的前提是建立在反复提及的 `order`，从这里出发，配合两个计算方式理论上就能分出想要的各种划分。
 我们最后再综合重复一遍 Dense 和 MoE global_rank 计算，采用的 order 依旧是 `tp-cp-ep-dp-pp`：
 ##### · Dense
-$$global\_rank = tp\_rank + cp\_rank * tp\_size + dp\_rank * tp\_size * cp\_size + pp\_rank * tp\_size * cp\_size * dp\_size$$
+$$\text{global\_rank} = \text{tp\_rank} + \text{cp\_rank} \times \text{tp\_size} + \text{dp\_rank} \times \text{tp\_size} \times \text{cp\_size} + \text{pp\_rank} \times \text{tp\_size} \times \text{cp\_size} \times \text{dp\_size}$$
 
 ##### · MoE
-$$global\_rank = etp\_rank + ep\_rank * etp\_size + edp\_rank * etp\_size * ep\_size + pp\_rank * etp\_size * ep\_size * edp\_size$$
+$$\text{global\_rank} = \text{etp\_rank} + \text{ep\_rank} \times \text{etp\_size} + \text{edp\_rank} \times \text{etp\_size} \times \text{ep\_size} + \text{pp\_rank} \times \text{etp\_size} \times \text{ep\_size} \times \text{edp\_size}$$
